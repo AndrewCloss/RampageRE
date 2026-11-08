@@ -54,6 +54,7 @@
 #include "settings.h"
 #include "wrand.h"
 #include "autoplay.h"
+#include "net.h"
 #ifdef __ANDROID__
 #include "touch.h"                               /* the on-screen pad, player 1's pad slot */
 #endif
@@ -305,6 +306,7 @@ typedef struct Viewer {
     float gui_side;                                  /* the window past each side of the 640 x 480 screen, its pixels */
     char data_path[512];                             /* RAMPAGE.VOL or the disc image (fx_open: the ELF beside / in it) */
     Movie *movie;                                    /* the movie the shell plays (movie.c), NULL none */
+    int movie_serial;                                /* [netplay] movies started: both sides end one together */
     int shell_mode, shell_go;                        /* --shell: a game's Quit goes back to it; a game to start */
     int lang;                                        /* --lang: the .loc column (hud.h: 0 English .. 8 Portuguese) */
     int region;                                      /* the disc's (iso.c data_region): 0 USA, 1 Europe, 2 another */
@@ -344,6 +346,42 @@ typedef struct Viewer {
                                                       * scripts load (open_city), on through its blocks and continues */
     int band_sound;                                  /* BandMember.bsf's bandSFXAllocated: the same life */
 } Viewer;
+
+/* ---- [port extra] online play (net.h): what main.c keeps of it */
+static struct {
+    uint32_t epoch;                                  /* the host's clock at the connection (seconds) */
+    NetInput in[2];                                  /* this step's pads: the host's, the guest's */
+    uint64_t steps;                                  /* steps run since the connection */
+    double base;                                     /* when step 0 was due (the 60 Hz schedule) */
+    int pressed[256];                                /* keys that went down while waiting for the other side */
+    double title_at;
+} g_net;
+
+/* the profile's save times: the host's clock at the connection plus the steps, the same on both sides */
+static uint64_t net_clock_ms(void)
+{
+    if (!net_active())
+        return (uint64_t)time(NULL) * 1000;
+    return (uint64_t)g_net.epoch * 1000 + g_net.steps * 1000 / 60;
+}
+
+/* a player's pad effect: player k's pad is this computer's own pads when k is this side's player */
+static void net_rumble(int slot, float strength, float seconds)
+{
+    if (!net_active())
+        pad_rumble(slot, strength, seconds);
+    else if (slot == net_slot())
+        for (int k = 0; k < PAD_SLOTS; k++)
+            pad_rumble(k, strength, seconds);
+}
+
+/* the shell's movie ends when both sides' has (a movie's end hangs on its sound's decoding, which runs at the
+ * sound card's pace) */
+static int net_movie_over(const Viewer *v)
+{
+    uint8_t want = (uint8_t)(0x80 | (v->movie_serial & 0x7F));
+    return g_net.in[0].movie == want && g_net.in[1].movie == want;
+}
 
 /* gCommon.getPlayType() of the game played: the demo's 0, else --play's or the shell's (unset: the campaign) */
 static int play_type(const Viewer *v) { return v->attract ? GP_ATTRACT : v->play_type ? v->play_type : GP_CAMPAIGN; }
@@ -388,7 +426,7 @@ static CamShake *mon_shake(Mon *mo)
 static void mon_rumble(const Mon *mo, int ms)
 {
     if (mo->v->pads_live && mo->v->vibrate && !mo->is_ai && mo->drive != DRIVE_COMPUTER)
-        pad_rumble(mo->slot, 0xC0 / 255.0f, ms / 1000.0f);
+        net_rumble(mo->slot, 0xC0 / 255.0f, ms / 1000.0f);
 }
 
 static void monster_hit(Mon *mo, const char *name, float amount, int level, const float knock[3], const float from[3]);
@@ -4185,7 +4223,7 @@ static void hud_frame(Viewer *v, int after)
             break;
         case HUD_CALL_RUMBLE_PULSE:                  /* gCommon.rumble(ms): pad 0 [R 0x2C34C8] */
             if (v->pads_live && v->vibrate)
-                pad_rumble(0, 0xC0 / 255.0f, calls[i].arg / 1000.0f);
+                net_rumble(0, 0xC0 / 255.0f, calls[i].arg / 1000.0f);
             break;
         case HUD_CALL_PLAY_MUSIC:
             if (!music_playing() && v->scene.music)
@@ -7617,6 +7655,7 @@ static void movie_start(Viewer *v, const char *name)
         return;
     }
     shell_movie_hold(v->shell);
+    v->movie_serial++;
     sound_stream(movie_pull, v->movie);
     if (getenv("RAMPAGE_TRACE"))
         printf("  movie %s (%s)\n", name, picked);
@@ -7640,7 +7679,7 @@ static void movie_step(Viewer *v)
             rnd_video(v->rnd, pic, w, h);
         shell_movie_picture(v->shell, 1);
     }
-    if (movie_done(v->movie, t)) {
+    if (net_active() ? net_movie_over(v) : movie_done(v->movie, t)) {
         if (getenv("RAMPAGE_TRACE"))
             printf("  movie over: %d pictures\n", movie_pictures(v->movie));
         shell_movie_end(v->shell);
@@ -7657,7 +7696,7 @@ static int card_job(Viewer *v, Shell *sh, const ShellEvent *e)
 {
     ShellProfile sp;
     int st = SHELL_CARD_OK;
-    uint64_t now = (uint64_t)time(NULL) * 1000;
+    uint64_t now = net_clock_ms();
     if (e->kind == SHELL_EVT_PROFILE_LOAD) {         /* the one profile file */
         Profile p = v->prof;
         int r = v->prof_write ? profile_read(&p, v->prof_path) : -1;
@@ -7711,7 +7750,7 @@ static void save_profile(Viewer *v)
         v->popup = shell_open_popup(&v->vol, v->have_gui ? &v->gui_common : NULL, &sp);
     Shell *sh = v->shell ? v->shell : v->popup;
     if (!sh) {                                       /* no MemoryCard.bdp: written at once */
-        if (profile_write(&v->prof, v->prof_path, 0, (uint64_t)time(NULL) * 1000) < 0)
+        if (profile_write(&v->prof, v->prof_path, 0, net_clock_ms()) < 0)
             printf("could not write the profile %s\n", v->prof_path);
         return;
     }
@@ -7778,7 +7817,7 @@ static int shell_answer(Viewer *v)
             case SHELL_EVT_RUMBLE: v->vibrate = profile_set_rumble(&v->prof, e->arg != 0, 0); break;
             case SHELL_EVT_RUMBLE_PULSE:             /* gCommon.rumble(ms): pad 0 [R 0x2C34C8] */
                 if (v->pads_live && v->vibrate)
-                    pad_rumble(0, 0xC0 / 255.0f, e->arg / 1000.0f);
+                    net_rumble(0, 0xC0 / 255.0f, e->arg / 1000.0f);
                 break;
             case SHELL_EVT_SAVE_SETTINGS:            /* Options' Accept: into the profile, saved */
                 shell_settings(v->shell, &sv, &mv, &rumble);
@@ -8135,6 +8174,162 @@ static int pad0_held(const Viewer *v)
         if (v->pads[0].buttons >> MAP[k].pad & 1)
             h |= MAP[k].held;
     return h;
+}
+
+/* ---- [port extra] online play: this computer's player as one pad (net.h). The keys play as player 1's keys do in a
+ * game of one's own (W A S D, the arrows, Space, J K L, R; P / Enter / Esc Start), and in the menus as theirs
+ * (the arrows, Enter / Space accept, Backspace / Esc back, C V R the buttons, F2 the cheat entry's L2 + R2); the
+ * controllers all count as this player's. The name entry takes letters, digits, Enter and Backspace as typed. */
+static int net_typing(const Viewer *v)
+{
+    const char *focus = v->shell ? shell_focus(v->shell) : NULL;
+    return focus && !strcmp(focus, "MemoryCard");
+}
+
+static int8_t net_q8(float x) { x = x < -1 ? -1 : x > 1 ? 1 : x; return (int8_t)lroundf(x * 127); }
+static uint8_t net_qu8(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return (uint8_t)lroundf(x * 255); }
+
+static NetInput net_local_input(const Viewer *v, const Window *w, const PadState *pads, unsigned on)
+{
+    NetInput in;
+    memset(&in, 0, sizeof in);
+    float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
+    for (int k = 0; k < PAD_SLOTS; k++) {            /* every controller here: this player's */
+        if (!(on >> k & 1))
+            continue;
+        const PadState *p = &pads[k];
+        in.buttons |= p->buttons;
+        if (!in.kind)
+            in.kind = (uint8_t)p->kind;
+        if (p->lx * p->lx + p->ly * p->ly > lx * lx + ly * ly) { lx = p->lx; ly = p->ly; }
+        if (p->rx * p->rx + p->ry * p->ry > rx * rx + ry * ry) { rx = p->rx; ry = p->ry; }
+        lt = fmaxf(lt, p->lt);
+        rt = fmaxf(rt, p->rt);
+    }
+#define KD(c) (w->keys[c] || w->pressed[c] || g_net.pressed[c])   /* held, or tapped since the last step */
+    int menu = v->shell || (v->hud && (hud_results_showing(v->hud) || hud_pause_showing(v->hud)));
+    int typing = net_typing(v);
+    if (typing) {                                    /* the name entry: what is typed, one key a step */
+        for (int c = 'A'; c <= 'Z' && !in.typed; c++)
+            if (w->pressed[c] || g_net.pressed[c]) in.typed = (uint8_t)c;
+        for (int c = '0'; c <= '9' && !in.typed; c++)
+            if (w->pressed[c] || g_net.pressed[c]) in.typed = (uint8_t)c;
+        if (!in.typed && (w->pressed[VK_RETURN] || g_net.pressed[VK_RETURN])) in.typed = '\r';
+        if (!in.typed && (w->pressed[VK_BACK] || g_net.pressed[VK_BACK])) in.typed = '\b';
+    }
+    if (menu) {
+        static const struct { int key, button; } M[] = {
+            { VK_UP, PAD_UP }, { VK_DOWN, PAD_DOWN }, { VK_LEFT, PAD_LEFT }, { VK_RIGHT, PAD_RIGHT },
+            { VK_SPACE, PAD_A }, { VK_ESCAPE, PAD_B }, { VK_NUMPAD0, PAD_A }, { VK_NUMPAD1, PAD_B },
+            { VK_NUMPAD7, PAD_X }, { VK_NUMPAD9, PAD_Y }, { VK_NUMPAD3, PAD_RT }, { VK_NUMPAD8, PAD_UP },
+            { VK_NUMPAD2, PAD_DOWN }, { VK_NUMPAD4, PAD_LEFT }, { VK_NUMPAD6, PAD_RIGHT } };
+        static const struct { int key, button; } MT[] = {   /* not while typing: these are letters / Enter there */
+            { VK_RETURN, PAD_A }, { VK_BACK, PAD_B }, { 'P', PAD_START }, { 'C', PAD_X }, { 'V', PAD_Y },
+            { 'R', PAD_RT }, { 'J', PAD_X }, { 'K', PAD_Y }, { 'L', PAD_B }, { 'W', PAD_UP }, { 'S', PAD_DOWN },
+            { 'A', PAD_LEFT }, { 'D', PAD_RIGHT } };
+        for (size_t k = 0; k < sizeof M / sizeof *M; k++)
+            if (KD(M[k].key)) in.buttons |= 1u << M[k].button;
+        for (size_t k = 0; !typing && k < sizeof MT / sizeof *MT; k++)
+            if (KD(MT[k].key)) in.buttons |= 1u << MT[k].button;
+        if (KD(VK_F2)) {                             /* the cheat entry: L2 + R2 held */
+            in.buttons |= 1u << PAD_LT | 1u << PAD_RT;
+            lt = rt = 1;
+        }
+    } else {
+        static const struct { int key, button; } G[] = {
+            { VK_SPACE, PAD_A }, { 'J', PAD_X }, { 'K', PAD_Y }, { 'L', PAD_B }, { 'R', PAD_RT }, { 'P', PAD_START },
+            { VK_RETURN, PAD_START }, { VK_ESCAPE, PAD_START }, { VK_NUMPAD0, PAD_A }, { VK_NUMPAD7, PAD_X },
+            { VK_NUMPAD9, PAD_Y }, { VK_NUMPAD1, PAD_B }, { VK_NUMPAD3, PAD_RT } };
+        for (size_t k = 0; k < sizeof G / sizeof *G; k++)
+            if (KD(G[k].key)) in.buttons |= 1u << G[k].button;
+        if (KD('R') || KD(VK_NUMPAD3)) rt = 1;
+        float kx = (float)((KD('D') || KD(VK_NUMPAD6)) - (KD('A') || KD(VK_NUMPAD4)));
+        float ky = (float)((KD('S') || KD(VK_NUMPAD2) || KD(VK_NUMPAD5)) - (KD('W') || KD(VK_NUMPAD8)));
+        if (kx || ky) { lx = kx; ly = ky; }
+        float kr = (float)(KD(VK_RIGHT) - KD(VK_LEFT)), ku = (float)(KD(VK_DOWN) - KD(VK_UP));
+        if (kr || ku) { rx = kr; ry = ku; }
+    }
+#undef KD
+    in.lx = net_q8(lx); in.ly = net_q8(ly); in.rx = net_q8(rx); in.ry = net_q8(ry);
+    in.lt = net_qu8(lt); in.rt = net_qu8(rt);
+    if (v->movie && v->shell) {                      /* this side's movie is over (net_movie_over) */
+        float t = shell_movie_clock(v->shell);
+        if (t >= 0 && movie_done(v->movie, t))
+            in.movie = (uint8_t)(0x80 | (v->movie_serial & 0x7F));
+    }
+    memset(g_net.pressed, 0, sizeof g_net.pressed);
+    return in;
+}
+
+static void net_to_pad(const NetInput *in, PadState *p)
+{
+    p->kind = in->kind ? in->kind : PADK_XBOX;
+    p->buttons = in->buttons;
+    p->lx = in->lx / 127.0f; p->ly = in->ly / 127.0f; p->rx = in->rx / 127.0f; p->ry = in->ry / 127.0f;
+    p->lt = in->lt / 255.0f; p->rt = in->rt / 255.0f;
+}
+
+/* the game's state folded into a word, after each step: both sides' must be the same */
+static uint32_t net_state_hash(const Viewer *v)
+{
+    uint32_t h = 2166136261u;
+#define MIX(x) do { uint32_t m_; float f_ = 0; (void)f_; m_ = (uint32_t)(x); h = (h ^ m_) * 16777619u; } while (0)
+#define MIXF(x) do { float f_ = (float)(x); uint32_t m_; memcpy(&m_, &f_, 4); h = (h ^ m_) * 16777619u; } while (0)
+    MIX(wrand_hash());
+    MIX(v->world_rng);
+    MIX(v->bot_seed);
+    MIX(v->shell != NULL);
+    MIX(v->game != NULL);
+    MIX(v->play);
+    MIX(v->nmon);
+    MIX(v->movie_serial);
+    MIX(v->prof.current.seed[0]);
+    MIX(v->prof.current.seed[1]);
+    if (v->shell) {
+        const char *f = shell_focus(v->shell);
+        for (; f && *f; f++)
+            MIX(*f);
+    }
+    if (v->game) {
+        MIX(game_state(v->game));
+        MIXF(game_clock(v->game, NULL));
+    }
+    if (!v->shell)
+        for (int k = 0; k < v->nmon; k++) {
+            MIXF(v->mon[k].mx);
+            MIXF(v->mon[k].my);
+            MIXF(v->mon[k].mz);
+            MIXF(v->mon[k].heading);
+            MIXF(v->mon[k].hp);
+        }
+    if (!v->shell && v->have_scene) {                /* the buildings standing, the people about */
+        for (uint32_t i = 0; i < v->scene.nbuildings; i++)
+            MIX(v->scene.buildings[i].b.state * 31u + (uint32_t)v->scene.buildings[i].b.roof);
+        if (v->scene.folk) {
+            int np = people_count(v->scene.folk);
+            MIX(np);
+            for (int i = 0; i < np; i++) {
+                const Person *p = people_get(v->scene.folk, i);
+                if (p)
+                    MIX(p->phase);
+            }
+        }
+    }
+    MIXF(v->play_now);
+#undef MIX
+#undef MIXF
+    return h;
+}
+
+/* waiting for the other side: the window answers; keys that go down meanwhile count for the next step */
+static int net_pump(void *ctx)
+{
+    Window *w = ctx;
+    win_poll(w);
+    for (int k = 0; k < 256; k++)
+        if (w->pressed[k])
+            g_net.pressed[k] = 1;
+    return w->quit;
 }
 
 /* the graphics settings in use, for the Options' Graphics page as it opens (the front end's, the Pause menu's) */
@@ -8527,6 +8722,16 @@ static int viewer_main(int argc, char **argv)
     v.left_block = -1;
     v.lang = -1;                                     /* (no --lang: the console's, below) */
     int newprofile = 0;
+    int net_mode = 0, net_port = NET_PORT, net_delay_arg = 3;   /* [netplay] 1 --host, 2 --join */
+    /* [netplay] RAMPAGE_NET_BOT="SEED STEPS": the test of the link (no window, no sound): this side's pad mashed at
+     * random from SEED for STEPS steps, as fast as both go; the state's hash printed every 600 steps */
+    unsigned net_bot_seed = 0;
+    long net_bot_steps = 0;
+    if (getenv("RAMPAGE_NET_BOT") && sscanf(getenv("RAMPAGE_NET_BOT"), "%u %ld", &net_bot_seed, &net_bot_steps) == 2)
+        plat_quiet = 1;
+    else
+        net_bot_steps = 0;
+    const char *net_addr = NULL;
 #ifdef __ANDROID__
     int wii_pick = 0;                                /* the Wii's data through the file picker first */
 #endif
@@ -8588,6 +8793,14 @@ static int viewer_main(int argc, char **argv)
         else if (strcmp(argv[i], "--nohud") == 0) v.no_hud = 1;
         else if (strcmp(argv[i], "--newprofile") == 0) newprofile = 1;
         else if (strcmp(argv[i], "--shell") == 0) v.shell_mode = 1;
+        else if (strcmp(argv[i], "--host") == 0) {   /* [netplay] --host [PORT] */
+            net_mode = 1;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9' && !strchr(argv[i + 1], '.'))
+                net_port = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--join") == 0 && i + 1 < argc) { net_mode = 2; net_addr = argv[++i]; }
+        else if (strcmp(argv[i], "--net-port") == 0 && i + 1 < argc) net_port = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--net-delay") == 0 && i + 1 < argc) net_delay_arg = atoi(argv[++i]);
 #ifdef __ANDROID__
         else if (strcmp(argv[i], "--wii-pick") == 0) wii_pick = 1;   /* the launcher's shortcut (RampageActivity.java) */
 #endif
@@ -8620,6 +8833,10 @@ static int viewer_main(int argc, char **argv)
         else if (npos < 3) pos[npos++] = argv[i];
     }
     settings_resolve(&gfx, &gfx_flags, !shot);       /* a --shot run: the flags alone, never rampage.cfg */
+    if (net_mode && !shot)                           /* [netplay] the front end, both players in it */
+        v.shell_mode = 1;
+    else
+        net_mode = 0;
     char found[1024], msg[1024];
     for (int i = 0; pos[0] && npos < 3 && i < NCITIES + 1; i++)   /* "rampage Chicago 1": no path, a city */
         if (_stricmp(pos[0], CITIES[i]) == 0 && !plat_exists(pos[0])) {
@@ -8730,11 +8947,81 @@ static int viewer_main(int argc, char **argv)
         printf("%s is the Wii's: it needs wii_data= (or --wii) with its files; Chicago instead\n", CITIES[NCITIES]);
     uint32_t block = (uint32_t)(atoi(pos[2]) > 0 ? atoi(pos[2]) - 1 : 0);
     Window w;
-    if (win_open(&w, "RampageRE", gfx.width, gfx.height, shot != NULL) != 0) {   /* a --shot run never shows a window */
+    if (net_bot_steps && !net_mode)
+        net_bot_steps = 0;
+    if (net_bot_steps)
+        mute = 1;
+    if (win_open(&w, "RampageRE", gfx.width, gfx.height, shot != NULL || net_bot_steps) != 0) {   /* a --shot run never shows a window */
         plat_message("Cannot open an OpenGL window.", 1);
         return 1;
     }
     settings_apply(&gfx, &w);
+    if (net_mode) {                                  /* [netplay] the other player, before anything they share */
+        NetHello me;
+        NetSetup *setup = calloc(1, sizeof *setup);
+        char err[600];
+        memset(&me, 0, sizeof me);
+        net_build_id(me.build, sizeof me.build);
+        me.vol_files = v.vol.count;
+        me.wii_files = v.vol.nwii;
+        me.ncities = (uint32_t)ncities;
+        const char *pp = v.prof_path ? v.prof_path : "rampage_profile.bin";
+        if (net_mode == 1) {                         /* the host's: its profile, language, menu settings */
+            char side[1100];
+            setup->lang = v.lang >= 0 ? v.lang : console_language(gfx.language, v.region);
+            setup->four_players = gfx.four_players;
+            setup->profile_autoload = gfx.profile_autoload;
+            setup->delay = net_delay_arg;
+            setup->epoch = (uint32_t)time(NULL);
+            FILE *f = newprofile ? NULL : fopen(pp, "rb");
+            if (f) {
+                setup->prof_n = (uint32_t)fread(setup->prof, 1, NET_PROFILE_MAX, f);
+                fclose(f);
+            }
+            profile_side_path(pp, side, sizeof side);
+            f = setup->prof_n ? fopen(side, "rb") : NULL;
+            if (f) {
+                setup->wprof_n = (uint32_t)fread(setup->wprof, 1, NET_PROFILE_MAX, f);
+                fclose(f);
+            }
+            snprintf(msg, sizeof msg, "RampageRE - hosting on UDP port %d: waiting for player 2 (Esc cancels)",
+                     net_port);
+        } else
+            snprintf(msg, sizeof msg, "RampageRE - joining %s ... (Esc cancels)", net_addr);
+        win_title(&w, msg);
+        printf("netplay: %s\n", msg + 12);
+        if (net_connect(net_mode == 1 ? NULL : net_addr, net_port, &me, setup, net_pump, &w, err, sizeof err) != 0) {
+            if (!w.quit)
+                plat_message(err, 1);
+            printf("netplay: %s\n", err);
+            return 1;
+        }
+        if (net_mode == 2) {                         /* the guest plays the host's profile, in a file of its own */
+            static char np[] = "rampage_profile.net.bin";
+            char side[64];
+            profile_side_path(np, side, sizeof side);
+            remove(np);
+            remove(side);
+            FILE *f;
+            if (setup->prof_n && (f = fopen(np, "wb"))) {
+                fwrite(setup->prof, 1, setup->prof_n, f);
+                fclose(f);
+            }
+            if (setup->wprof_n && (f = fopen(side, "wb"))) {
+                fwrite(setup->wprof, 1, setup->wprof_n, f);
+                fclose(f);
+            }
+            v.prof_path = np;
+            newprofile = 0;
+        }
+        v.lang = setup->lang;
+        gfx.four_players = setup->four_players;
+        gfx.profile_autoload = setup->profile_autoload;
+        g_net.epoch = setup->epoch;
+        v.card_free_kb = 8 * 1024;                   /* the card's room: the same for both (not this drive's) */
+        free(setup);
+        win_title(&w, "RampageRE");
+    }
     v.gfx = &gfx;
     v.win = &w;
     v.gfx_write = !shot;
@@ -8745,6 +9032,11 @@ static int viewer_main(int argc, char **argv)
 #ifdef __ANDROID__
         v.pads_on |= touch_pad(v.pads, v.pads_on);
 #endif
+        if (net_active()) {                          /* [netplay] the two players' pads, nothing pressed yet */
+            memset(v.pads, 0, sizeof v.pads);
+            v.pads[0].kind = v.pads[1].kind = PADK_XBOX;
+            v.pads_on = 3;
+        }
     }
     v.fog = v.fog < 0 ? 0 : 1;                       /* the game's fog (LightingData FogStart / FogEnd), F toggles it */
     v.rnd = rnd_create();
@@ -8980,12 +9272,40 @@ static int viewer_main(int argc, char **argv)
             printf("capture: %dx%d, steps %ld .. %ld\n", w.width, w.height, cap_from, cap_to);
         }
     }
+    g_net.base = net_time();
     while (!w.quit) {
+        if (net_active() && net_bot_steps && (long)g_net.steps >= net_bot_steps) {
+            printf("netbot: done, %ld steps, hash %08X%s\n", net_bot_steps, net_state_hash(&v),
+                   net_desynced(NULL) ? ", DESYNC" : "");
+            break;
+        }
+        if (net_active() && !net_bot_steps) {        /* [netplay] one step every 1/60 s, as the other side */
+            double due = g_net.base + (double)g_net.steps / 60, t = net_time();
+            if (t > due + 0.25)                      /* far behind (a load, a stall): a new schedule from here */
+                g_net.base = t - (double)g_net.steps / 60;
+            else {
+                if (due - t > 0.002)
+                    net_sleep(due - t - 0.0015);
+                while (net_time() < due)
+                    ;
+            }
+        }
         win_poll(&w);
         double now = win_time();
         float dt = (float)(now - last);
         last = now;
+        if (net_active())                            /* [netplay] the same step on both sides */
+            dt = 1.0f / 60;
         int apf = 0;                                 /* --autoplay: the watchdog's asks this frame */
+        if (net_active() && now - g_net.title_at > 0.5) {   /* [netplay] who, the link's delay, a desync */
+            char tt[160];
+            uint32_t df = 0;
+            int ds = net_desynced(&df);
+            snprintf(tt, sizeof tt, "RampageRE - online, player %d - ping %.0f ms - delay %d%s", net_slot() + 1,
+                     net_ping_ms(), net_delay(), ds ? " - OUT OF SYNC (see rampage.log)" : "");
+            win_title(&w, tt);
+            g_net.title_at = now;
+        }
         if (v.ap) {                                  /* simulated time, 60 frames a second */
             dt = 1.0f / 60;
             v.ap_t += dt;
@@ -9009,7 +9329,66 @@ static int viewer_main(int argc, char **argv)
         }
         if (!(v.hud && hud_paused(v.hud)))           /* (paused: the Pause menu, GameOver's pauseGame(1)) */
             world_t += dt;
-        if (v.pads_live) {                           /* this frame's controllers, the vibration on them */
+        if (v.pads_live && net_active()) {           /* [netplay] this step's pads, both players' (net.h) */
+            PadState mine[PAD_SLOTS];
+            unsigned on = pad_poll(mine, w.focused, (unsigned)w.dev_changes);
+            pad_set_strength(v.vibrate ? 1.0f : 0.0f);
+            if (g_net.steps)                         /* the state the last step left */
+                net_hash(net_frame() - 1, net_state_hash(&v));
+            NetInput li = net_local_input(&v, &w, mine, on);
+            if (net_bot_steps) {                     /* the test: a random pad, a new one every few steps */
+                static NetInput bot;
+                static uint32_t r;
+                if (!r)
+                    r = net_bot_seed * 2654435761u + 1;
+                if (g_net.steps % 12 == 0) {
+                    static const int B[] = { PAD_A, PAD_A, PAD_A, PAD_A, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT,
+                                             PAD_X, PAD_Y, PAD_START, PAD_B, PAD_RT };
+                    memset(&bot, 0, sizeof bot);
+                    r = r * 1103515245u + 12345u;
+                    if (r >> 16 & 1)
+                        bot.buttons = 1u << B[(r >> 20) % (sizeof B / sizeof *B)];
+                    r = r * 1103515245u + 12345u;
+                    bot.lx = (int8_t)((int)(r >> 24) - 128);
+                    bot.ly = (int8_t)((int)(r >> 16 & 255) - 128);
+                } else if (g_net.steps % 12 == 3)
+                    bot.buttons = 0;                 /* let go (the next press is a new one) */
+                bot.movie = li.movie;
+                li = bot;
+                if (g_net.steps % 600 == 0)
+                    printf("netbot: step %llu hash %08X %s%s\n", (unsigned long long)g_net.steps, net_state_hash(&v),
+                           v.shell ? shell_focus(v.shell) ? shell_focus(v.shell) : "shell" : v.game ? "game" : "-",
+                           net_desynced(NULL) ? " DESYNC" : "");
+            }
+            if (net_step(&li, g_net.in, net_pump, &w)) {
+                memcpy(v.pads_prev, v.pads, sizeof v.pads);
+                memset(v.pads, 0, sizeof v.pads);
+                net_to_pad(&g_net.in[0], &v.pads[0]);
+                net_to_pad(&g_net.in[1], &v.pads[1]);
+                v.pads_on = 3;
+                g_net.steps++;
+                /* the keys: only this computer's own (F5 .. F12: the graphics, fullscreen, a screenshot); the
+                 * game's went into the pad above. The name entry gets player 1's typing */
+                int keep[256] = { 0 }, keep_p[256] = { 0 };
+                for (int k = VK_F3; k <= VK_F12; k++) {
+                    keep[k] = w.keys[k];
+                    keep_p[k] = w.pressed[k];
+                }
+                memcpy(w.keys, keep, sizeof w.keys);
+                memcpy(w.pressed, keep_p, sizeof w.pressed);
+                uint8_t c = g_net.in[0].typed;
+                if (c && net_typing(&v))
+                    w.pressed[c == '\r' ? VK_RETURN : c == '\b' ? VK_BACK : c] = 1;
+            } else {                                 /* the link is gone: on alone, the pads as they are here */
+                if (w.quit)
+                    break;
+                plat_message("The connection to the other player was lost. The game goes on here alone.", 0);
+                memcpy(v.pads_prev, v.pads, sizeof v.pads);
+                memcpy(v.pads, mine, sizeof v.pads);
+                v.pads_on = on;
+                win_title(&w, "RampageRE");
+            }
+        } else if (v.pads_live) {                    /* this frame's controllers, the vibration on them */
             memcpy(v.pads_prev, v.pads, sizeof v.pads);
             v.pads_on = pad_poll(v.pads, w.focused, (unsigned)w.dev_changes);
 #ifdef __ANDROID__
@@ -9368,6 +9747,7 @@ static int viewer_main(int argc, char **argv)
     if (v.have_scene)
         scene_free(&v.scene);
     city_close(v.city);
+    net_close();
     sound_end();
     sound_free();
     win_close(&w);

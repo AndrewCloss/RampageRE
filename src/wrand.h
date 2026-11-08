@@ -16,5 +16,6 @@ float wrand_frand(void);                             /* gWorld.frand(): [0, 1) *
 int wrand_rand(void);                                /* gWorld.rand(): 0 .. 65535 */
 void wrand_seed_lf(uint32_t seed);                   /* 0x1069C0 */
 uint32_t wrand_lf(void);                             /* 0x106950 */
+uint32_t wrand_hash(void);                           /* port extra: both states hashed, nothing drawn */
 
 #endif

@@ -48,3 +48,12 @@ uint32_t wrand_lf(void)
     lf.j = lf.j == 16 ? 0 : lf.j + 1;
     return v;
 }
+
+/* port extra (net.c): both states folded into one word, nothing drawn (the netplay's desync check) */
+uint32_t wrand_hash(void)
+{
+    uint32_t h = pm * 2654435761u ^ lf.i << 8 ^ lf.j;
+    for (int k = 0; k < 17; k++)
+        h = (h ^ lf.t[k]) * 16777619u;
+    return h;
+}
