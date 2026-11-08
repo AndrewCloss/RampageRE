@@ -428,8 +428,9 @@ int net_connect(const char *addr, int port, const NetHello *mine, NetSetup *setu
                     memcpy(&tot, buf + 13 + sizeof h, 4);
                     if (hello_check(mine, &h, err, errcap) != 0)
                         return -1;
-                    if (part != want || tot > sizeof blob || tot < SETUP_HEAD)
-                        continue;
+                    if (part != want || tot > sizeof blob || tot < SETUP_HEAD ||
+                        ps != (tot + PART_MAX - 1) / PART_MAX || (uint64_t)part * PART_MAX + (uint32_t)(n - hl) > tot)
+                        continue;                    /* (a part that is not this one, or would not fit the blob) */
                     memcpy(blob + part * PART_MAX, buf + hl, (size_t)(n - hl));
                     parts = ps;
                     total = tot;
