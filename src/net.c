@@ -153,8 +153,7 @@ static int sock_open(int port)
         struct sockaddr_in6 a;
         memset(&a, 0, sizeof a);
         a.sin6_family = AF_INET6;
-        a.sin6_port = htons((unsigned short)port);
-        a.sin6_addr = in6addr_any;
+        a.sin6_port = htons((unsigned short)port);   /* sin6_addr all zeros: in6addr_any (which VitaSDK lacks) */
         if (bind(N.s, (struct sockaddr *)&a, sizeof a) != 0) {
             sock_close(N.s);
             N.s = SOCK_BAD;
