@@ -140,6 +140,29 @@ asks nor copies. It starts in the front end and plays on the on-screen pad (a st
 Cross / Square / Triangle / Circle, R2 and Start on the right) or on a controller; the back button is back or the
 Pause menu ([docs/NATIVE.md](docs/NATIVE.md) "Android").
 
+### Online play (Windows and Linux)
+Two players on two computers play together over the internet or a LAN. Both copies run the whole game in lockstep and only
+the pads cross the wire, so **both players need the same build** (the same `RampageRE.exe` / `rampage`, e.g. from the
+same release) and **the same game data** (the same disc image; the Wii's extras on both sides or on neither). The host is
+player 1 and the guest player 2; each plays with their own keyboard (player 1's keys) or first controller.
+
+**Hosting**: start the game with `--host`, e.g. a shortcut to `RampageRE.exe --host`, or `./rampage ~/Rampage.iso --host`
+on Linux. The window's title says it is waiting for player 2 on UDP port **7777** (`--host 7778` picks another port).
+The guest must be able to reach that port: on a LAN allow `RampageRE.exe` through the firewall when Windows asks; over the
+internet forward UDP 7777 on your router to your computer (or use a VPN such as Tailscale or ZeroTier and share that
+address). Give the guest your IP address (and port, if not 7777). The host's profile, language and menu settings
+(four_players, profile_autoload) are used for the session.
+
+**Joining**: start the game with `--join ADDRESS`, e.g. `RampageRE.exe --join 203.0.113.5`, `--join 192.168.1.20:7778`
+or `--join myhost.example.com`. It tries for 30 seconds; start it once the host is waiting. The guest plays a copy of
+the host's profile (`rampage_profile.net.bin`), so the guest's own profile is not touched.
+
+Once connected, both land in the front end with both players in it. Esc cancels while waiting. `--net-delay N`
+(1 .. 12 frames, default 3; the host's counts) sets the input delay: raise it if the game stutters on a slow link. The
+title bar shows the player number, the ping and the delay, and **OUT OF SYNC** if the two copies ever differ (the frame
+is in `rampage.log`); if the link drops, the game goes on alone. When the connection fails, a message box says why (e.g. the builds or the data
+differ, no answer from the host, the port is in use).
+
 ### The Wii's monsters and Dallas (optional)
 The Wii version adds to the PS2 game ten monsters (Boris and Ruby from the start; Plucky, Fifi and Cyril
 revealed in Dallas; Squirmy, Flea, Sarah, Brian and VERN for 1, 3, 6, 12 and 20 monsters with all five upgrades),
