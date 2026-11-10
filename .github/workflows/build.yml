@@ -103,6 +103,7 @@ jobs:
             New-Item -ItemType Directory -Force $dir | Out-Null
             Copy-Item $f $dir
           }
+          Copy-Item 'res/Host Online.bat', 'res/Join Online.bat' "pkg/$name/"   # online play (README.md)
           Compress-Archive -Path "pkg/$name" -DestinationPath "$name.zip"
           "PKG=$name.zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
@@ -117,7 +118,7 @@ jobs:
           $bad = @($names | Where-Object { $_ -match '(?i)\.(vol|elf|iso|bin|cue)$|(^|/)SLES_|(^|/)build/' })
           if ($bad.Count) { "::error::game data in the package: $($bad -join ', ')"; exit 1 }
           $root = [IO.Path]::GetFileNameWithoutExtension($env:PKG)
-          $want = 'RampageRE.exe', 'RampageRE-dev.exe', 'README.md', 'LICENSE', 'docs/NATIVE.md', 'docs/TEXTURES.md' | ForEach-Object { "$root/$_" }
+          $want = 'RampageRE.exe', 'RampageRE-dev.exe', 'README.md', 'LICENSE', 'docs/NATIVE.md', 'docs/TEXTURES.md', 'Host Online.bat', 'Join Online.bat' | ForEach-Object { "$root/$_" }
           $extra = @($names | Where-Object { -not $_.EndsWith('/') -and $_ -notin $want })
           $missing = @($want | Where-Object { $_ -notin $names })
           if ($extra.Count -or $missing.Count) { "::error::unexpected: $($extra -join ', ') missing: $($missing -join ', ')"; exit 1 }

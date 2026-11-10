@@ -146,14 +146,17 @@ the pads cross the wire, so **both players need the same build** (the same `Ramp
 same release) and **the same game data** (the same disc image; the Wii's extras on both sides or on neither). The host is
 player 1 and the guest player 2; each plays with their own keyboard (player 1's keys) or first controller.
 
-**Hosting**: start the game with `--host`, e.g. a shortcut to `RampageRE.exe --host`, or `./rampage ~/Rampage.iso --host`
+On Windows the release zip has two shortcuts beside `RampageRE.exe`: **`Host Online.bat`** hosts, and **`Join Online.bat`**
+asks for the host's address and joins (both are in `res/` in the repository).
+
+**Hosting**: start the game with `--host`, e.g. `Host Online.bat` or a shortcut to `RampageRE.exe --host`, or `./rampage ~/Rampage.iso --host`
 on Linux. The window's title says it is waiting for player 2 on UDP port **7777** (`--host 7778` picks another port).
 The guest must be able to reach that port: on a LAN allow `RampageRE.exe` through the firewall when Windows asks; over the
 internet forward UDP 7777 on your router to your computer (or use a VPN such as Tailscale or ZeroTier and share that
 address). Give the guest your IP address (and port, if not 7777). The host's profile, language and menu settings
 (four_players, profile_autoload) are used for the session.
 
-**Joining**: start the game with `--join ADDRESS`, e.g. `RampageRE.exe --join 203.0.113.5`, `--join 192.168.1.20:7778`
+**Joining**: start the game with `--join ADDRESS`, e.g. `Join Online.bat`, `RampageRE.exe --join 203.0.113.5`, `--join 192.168.1.20:7778`
 or `--join myhost.example.com`. It tries for 30 seconds; start it once the host is waiting. The guest plays a copy of
 the host's profile (`rampage_profile.net.bin`), so the guest's own profile is not touched.
 
