@@ -8310,10 +8310,27 @@ static uint32_t net_state_hash(const Viewer *v)
             MIX(np);
             for (int i = 0; i < np; i++) {
                 const Person *p = people_get(v->scene.folk, i);
-                if (p)
+                if (p) {
                     MIX(p->phase);
+                    MIXF(p->pos[0]);
+                    MIXF(p->pos[1]);
+                }
             }
         }
+        if (v->army) {                               /* the army's units, where they are */
+            int nu = army_count(v->army);
+            MIX(nu);
+            for (int i = 0; i < nu; i++) {
+                const ArmyUnit *u = army_unit(v->army, i);
+                if (u && u->phase != AU_GONE) {
+                    MIX(u->kind * 8u + (uint32_t)u->phase);
+                    MIXF(u->pos[0]);
+                    MIXF(u->pos[1]);
+                }
+            }
+        }
+        for (int k = 0; k < 3; k++)                  /* the game camera: it decides who is on screen (people_visible) */
+            MIXF(v->view.pos[k]);
     }
     MIXF(v->play_now);
 #undef MIX
@@ -9360,7 +9377,16 @@ static int viewer_main(int argc, char **argv)
                            v.shell ? shell_focus(v.shell) ? shell_focus(v.shell) : "shell" : v.game ? "game" : "-",
                            net_desynced(NULL) ? " DESYNC" : "");
             }
-            if (net_step(&li, g_net.in, net_pump, &w)) {
+            uint32_t dsf = 0;
+            if (net_desynced(&dsf)) {                /* [netplay] the two games went apart: nothing puts them back in
+                                                      * step, so the link ends here (and, by the BYE, there) */
+                net_close();
+                if (net_bot_steps) {
+                    printf("netbot: DESYNC at frame %u, step %llu\n", dsf, (unsigned long long)g_net.steps);
+                    break;
+                }
+            }
+            if (net_active() && net_step(&li, g_net.in, net_pump, &w)) {
                 memcpy(v.pads_prev, v.pads, sizeof v.pads);
                 memset(v.pads, 0, sizeof v.pads);
                 net_to_pad(&g_net.in[0], &v.pads[0]);
@@ -9382,7 +9408,19 @@ static int viewer_main(int argc, char **argv)
             } else {                                 /* the link is gone: on alone, the pads as they are here */
                 if (w.quit)
                     break;
-                plat_message("The connection to the other player was lost. The game goes on here alone.", 0);
+                if (net_bot_steps) {
+                    printf("netbot: the link ended at step %llu%s\n", (unsigned long long)g_net.steps,
+                           net_desynced(NULL) ? ", DESYNC" : "");
+                    break;
+                }
+                if (net_desynced(&dsf)) {
+                    char msg[400];
+                    snprintf(msg, sizeof msg, "The two games went out of step (at frame %u): each of you was seeing a "
+                             "different game, so the online link has ended. The game goes on here alone.\n\nHost and "
+                             "join again to play together (rampage.log has the details).", dsf);
+                    plat_message(msg, 1);
+                } else
+                    plat_message("The connection to the other player was lost. The game goes on here alone.", 0);
                 memcpy(v.pads_prev, v.pads, sizeof v.pads);
                 memcpy(v.pads, mine, sizeof v.pads);
                 v.pads_on = on;
@@ -9581,6 +9619,11 @@ static int viewer_main(int argc, char **argv)
         int playing = v.play && have_monster(&v) && v.have_scene && mon_in(&v.mon[0]);
         if (playing) {
             float aspect = w.width ? (float)w.height / w.width : 0.75f;
+            if (net_active())                        /* [netplay] the game camera fits the monsters into a 4:3 view
+                                                      * on both sides, whatever each window's shape: where it stands
+                                                      * decides who is on screen (people_visible: the people, the
+                                                      * army, the boss), so a window of another shape would desync */
+                aspect = 0.75f;
             if (shot && !settled) {                     /* a shot: the camera settles, then the script */
                 if (!v.ap)                           /* (--autoplay: its words first, then it plays on) */
                     play_script(&v, "wait 2", aspect);

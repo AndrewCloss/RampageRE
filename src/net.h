@@ -6,7 +6,9 @@
  * frames ahead, so on a link faster than that the game never waits. At the connection the host hands the guest
  * what decides the game besides the pads: its profile (rampage_profile.bin and its .wii.bin), its language,
  * four_players and profile_autoload. Each side hashes its game state every frame and sends the hash with its
- * pads; a different hash is a desync, which is logged and shown in the window's title.
+ * pads; a different hash is a desync: nothing can put the two back in step, so the side that sees it logs it and ends
+ * the link (its BYE says why, so the other side ends too), and each player is told. The game camera fits a 4:3 view
+ * on both sides whatever the windows' shapes, since where it stands decides who is on screen.
  *
  *   RampageRE.exe --host [PORT]            wait for a player on UDP PORT (default 7777)
  *   RampageRE.exe --join HOST[:PORT]       join one (an IP address or a name)

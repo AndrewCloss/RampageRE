@@ -8,7 +8,7 @@
  *   INPUT   first u32, count u8, ack u32 (the last frame of the other side's held in a row, + 1), hash_frame u32,
  *           hash u32, then count NetInputs from frame first: every frame not yet acknowledged, each time (a lost
  *           packet costs nothing but the next one's arrival)
- *   BYE     the game was closed
+ *   BYE     the game was closed: desync u8 (1: over a desync, the other side ends too), the desync's frame u32
  * The setup blob: NetSetup's header (its fields up to prof), then prof_n bytes, then wprof_n bytes. */
 #include "net.h"
 #include <stdio.h>
@@ -546,7 +546,11 @@ static void receive(void)
             continue;
         N.last_recv = net_time();
         if (buf[4] == P_BYE) {
-            printf("netplay: the other player left\n");
+            if (n >= 10 && buf[5] && !N.desync) {    /* they left over a desync they saw (net_close) */
+                N.desync = 1;
+                memcpy(&N.desync_frame, buf + 6, 4);
+            }
+            printf(N.desync ? "netplay: the games are out of step: the link ends\n" : "netplay: the other player left\n");
             N.active = 0;
             return;
         }
@@ -633,8 +637,11 @@ void net_close(void)
 {
     if (N.s != SOCK_BAD) {
         if (N.active) {
-            uint8_t b[8];
+            uint8_t b[16];
             int n = put_head(b, P_BYE);
+            b[n++] = (uint8_t)(N.desync != 0);       /* why: a desync (the other side ends too), at that frame */
+            memcpy(b + n, &N.desync_frame, 4);
+            n += 4;
             for (int k = 0; k < 3; k++)
                 send_raw(b, n);
         }
